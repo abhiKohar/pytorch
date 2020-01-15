@@ -96,34 +96,45 @@ std::ostream& operator<<(
   return out;
 }
 
-template <typename T>
-static void printPrimList(std::ostream& out, const std::vector<T>& items) {
-  out << "[";
-  int i = 0;
-  for (auto& item : items) {
-    if (i++ > 0) {
-      out << ", ";
-    }
-    out << item;
+#define PRINT_VALUE(dtype)                                    \
+  static void printAttribute(std::ostream& out, dtype attr) { \
+    out << attr;                                              \
   }
-  out << "]";
+PRINT_VALUE(bool)
+PRINT_VALUE(int64_t)
+PRINT_VALUE(double)
+
+#define PRINT_LIST(container, dtype, format_item)        \
+  static void printAttribute(                            \
+      std::ostream& out, const container<dtype>& attr) { \
+    out << "[";                                          \
+    int i = 0;                                           \
+    for (dtype item : attr) {                            \
+      if (i++ > 0) {                                     \
+        out << ", ";                                     \
+      }                                                  \
+      out << format_item;                                \
+    }                                                    \
+    out << "]";                                          \
+  }
+
+// clang-format off
+PRINT_LIST(std::vector, int64_t, item)
+PRINT_LIST(c10::List, int64_t, item)
+
+/* use ivalue printing to corretly format floats with no decimal */
+PRINT_LIST(std::vector, double, IValue(item))
+PRINT_LIST(c10::List, double, IValue(item))
+
+// bool[] attributes stored as int64_t[], no need for std::vector overload
+PRINT_LIST(c10::List, bool, item)
+// clang-format on
+
+static void printAttribute(std::ostream& out, const std::string& attr) {
+  c10::printQuotedString(out, attr);
 }
 
-static void printPrimList(std::ostream& out, const std::vector<double>& items) {
-  out << "[";
-  int i = 0;
-  for (auto& item : items) {
-    if (i++ > 0) {
-      out << ", ";
-    }
-    // use ivalue printing so that it will correctly format floats with
-    // no decimal
-    out << IValue(item);
-  }
-  out << "]";
-}
-
-static void printStrList(
+static void printAttribute(
     std::ostream& out,
     const std::vector<std::string>& items) {
   out << "[";
@@ -134,6 +145,95 @@ static void printStrList(
     c10::printQuotedString(out, item);
   }
   out << "]";
+}
+
+static void printAttribute(std::ostream& out, const at::Tensor& tensor) {
+  // 1-elem tensors are usually boxed scalars, so print them like it
+  if (tensor.numel() == 1) {
+    auto scalar_tensor = tensor.view({}).item();
+    out << "{";
+    if (scalar_tensor.isFloatingPoint()) {
+      out << scalar_tensor.toDouble();
+    } else {
+      out << scalar_tensor.toLong();
+    }
+    out << "}";
+  } else if (tensor.numel() <= max_tensor_display_size) {
+    // TODO: This is awful code.  Also it doesn't work on Windows.
+    std::ostringstream tensor_ss;
+    tensor_ss << tensor;
+    std::string tensor_s{tensor_ss.str()};
+    // Remove newlines
+    std::replace(tensor_s.begin(), tensor_s.end(), '\n', ' ');
+    out << tensor_s;
+  } else {
+    out << "<Tensor>";
+  }
+}
+
+static void printAttribute(
+    std::ostream& out,
+    const std::vector<at::Tensor>& attr) {
+  out << "[<Tensors>]";
+}
+
+static void printAttribute(
+    std::ostream& out,
+    const c10::List<at::Tensor>& attr) {
+  out << "[<Tensors>]";
+}
+
+static void printAttribute(
+    std::ostream& out,
+    const c10::intrusive_ptr<at::ivalue::Tuple>& attr);
+
+static void printAttribute(std::ostream& out, const IValue& ival) {
+#define PRINT_IVALUE(type)                \
+  if (ival.is##type()) {                  \
+    printAttribute(out, ival.to##type()); \
+    return;                               \
+  };
+  PRINT_IVALUE(Int)
+  PRINT_IVALUE(IntList)
+  PRINT_IVALUE(Bool)
+  PRINT_IVALUE(BoolList)
+  PRINT_IVALUE(Double)
+  PRINT_IVALUE(DoubleList)
+  PRINT_IVALUE(Tensor)
+  PRINT_IVALUE(TensorList)
+  PRINT_IVALUE(Tuple)
+  if (ival.isString()) {
+    printAttribute(out, ival.toStringRef());
+    return;
+  }
+  if (ival.type()->isSubtypeOf(ListType::ofStrings())) {
+    auto str_list = ival.toGenericListRef();
+    printAttribute(out, fmap(str_list, [](const IValue& ival) {
+                     return ival.toStringRef();
+                   }));
+    return;
+  }
+  if (ival.isNone()) {
+    out << "None";
+    return;
+  }
+  TORCH_INTERNAL_ASSERT(false);
+}
+
+static void printAttribute(
+    std::ostream& out,
+    const c10::intrusive_ptr<at::ivalue::Tuple>& attr) {
+  out << "(";
+  const char* delim = "";
+  for (const auto& elem : attr->elements()) {
+    out << delim;
+    printAttribute(out, elem);
+    delim = ", ";
+  }
+  if (attr->elements().size() == 1) {
+    out << ",";
+  }
+  out << ")";
 }
 
 static void printTypeList(
@@ -152,50 +252,31 @@ static void printTypeList(
 void Node::printAttrValue(std::ostream& out, const Symbol& name) const {
   switch (kindOf(name)) {
     case AttributeKind::f:
-      out << f(name);
+      printAttribute(out, f(name));
       break;
     case AttributeKind::fs:
-      printPrimList(out, fs(name));
+      printAttribute(out, fs(name));
       break;
     case AttributeKind::i:
-      out << i(name);
+      printAttribute(out, i(name));
       break;
     case AttributeKind::is:
-      printPrimList(out, is(name));
+      printAttribute(out, is(name));
       break;
     case AttributeKind::s:
-      c10::printQuotedString(out, s(name));
+      printAttribute(out, s(name));
       break;
     case AttributeKind::ss:
-      printStrList(out, ss(name));
+      printAttribute(out, ss(name));
       break;
-    case AttributeKind::t: {
-      at::Tensor tensor = t(name);
-      // 1-elem tensors are usually boxed scalars, so print them like it
-      if (tensor.numel() == 1) {
-        auto scalar_tensor = tensor.view({}).item();
-        out << "{";
-        if (scalar_tensor.isFloatingPoint()) {
-          out << scalar_tensor.toDouble();
-        } else {
-          out << scalar_tensor.toLong();
-        }
-        out << "}";
-      } else if (tensor.numel() <= max_tensor_display_size) {
-        // TODO: This is awful code.  Also it doesn't work on Windows.
-        std::ostringstream tensor_ss;
-        tensor_ss << tensor;
-        std::string tensor_s{tensor_ss.str()};
-        // Remove newlines
-        std::replace(tensor_s.begin(), tensor_s.end(), '\n', ' ');
-        out << tensor_s;
-      } else {
-        out << "<Tensor>";
-      }
+    case AttributeKind::t:
+      printAttribute(out, t(name));
       break;
-    }
     case AttributeKind::ts:
-      out << "[<Tensors>]";
+      printAttribute(out, ts(name));
+      break;
+    case AttributeKind::ival:
+      printAttribute(out, ival(name));
       break;
     case AttributeKind::g:
       out << "<Graph>";
@@ -212,8 +293,8 @@ void Node::printAttrValue(std::ostream& out, const Symbol& name) const {
   }
 }
 
-void Node::printAttributes(std::ostream &out,
-                           bool ignore_subgraph = false) const {
+void Node::printAttributes(std::ostream& out, bool ignore_subgraph = false)
+    const {
   out << "[";
   auto names = attributeNames();
   int i = 0;
@@ -249,10 +330,14 @@ static std::ostream& indent(std::ostream& out, size_t level) {
   return out;
 }
 
-std::ostream &Node::print(std::ostream &out, size_t level,
-                          std::vector<const Node *> *groups,
-                          bool print_source_locations, bool print_attributes,
-                          bool print_scopes, bool print_body) const {
+std::ostream& Node::print(
+    std::ostream& out,
+    size_t level,
+    std::vector<const Node*>* groups,
+    bool print_source_locations,
+    bool print_attributes,
+    bool print_scopes,
+    bool print_body) const {
   auto outs = outputs();
   indent(out, level) << const_value_list_with_types(outs);
   out << " = ";
@@ -835,16 +920,19 @@ void Value::replaceAllUsesWith(Value* newValue) {
 }
 
 void Value::replaceAllUsesAfterNodeWith(const Node* node, Value* newValue) {
-  std::for_each(uses_.begin(), uses_.end(), [&node, newValue](Use &u) {
+  std::for_each(uses_.begin(), uses_.end(), [&node, newValue](Use& u) {
     if (u.user->isAfter(node)) {
       u.user->inputs_[u.offset] = newValue;
       newValue->uses_.push_back(u);
     }
   });
 
-  uses_.erase(std::remove_if(uses_.begin(), uses_.end(), [&node](const Use& u){
-    return u.user->isAfter(node);
-  }), uses_.end());
+  uses_.erase(
+      std::remove_if(
+          uses_.begin(),
+          uses_.end(),
+          [&node](const Use& u) { return u.user->isAfter(node); }),
+      uses_.end());
 }
 
 size_t findArgument(const FunctionSchema& the_schema, Symbol name) {

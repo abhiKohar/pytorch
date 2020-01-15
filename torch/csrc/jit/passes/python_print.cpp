@@ -446,6 +446,25 @@ struct PythonPrintImpl {
     stmt << end;
   }
 
+  void printIValueList(
+      std::stringstream& stmt,
+      at::ArrayRef<IValue> list,
+      const char* begin = "",
+      const char* end = "") {
+    stmt << begin;
+    auto delimiter = "";
+    for (const auto& value : list) {
+      stmt << delimiter;
+      printConstant(stmt, value);
+      delimiter = ", ";
+    }
+    stmt << end;
+  }
+
+  std::string tuplePrintEndChar(size_t tuple_len) {
+    return tuple_len == 1 ? ",)" : ")";
+  }
+
   void printValueIndex(TaggedStringStream& stmt, at::ArrayRef<Value*> inputs) {
     const std::string val_name = useOf(inputs[0])->str();
     if (isValidIdentifier(val_name)) {
@@ -793,7 +812,8 @@ struct PythonPrintImpl {
     }
   }
 
-  void printConstant(TaggedStringStream& stmt, const IValue& v) {
+  template <typename T>
+  void printConstant(T& stmt, const IValue& v) {
     std::stringstream ss;
     if (v.isTensor()) {
       ss << "CONSTANTS.c" << getOrAddTensorConstant(v.toTensor());
@@ -834,6 +854,13 @@ struct PythonPrintImpl {
         }
         ss << "]";
       }
+    } else if (v.isTuple()) {
+      auto elems = v.toTuple()->elements();
+      printIValueList(
+          ss,
+          v.toTuple()->elements(),
+          "(",
+          tuplePrintEndChar(elems.size()).c_str());
     } else {
       ss << v;
     }
@@ -942,7 +969,10 @@ struct PythonPrintImpl {
           stmt << qualname->qualifiedName();
         }
         printValueList(
-            stmt, node->inputs(), "(", node->inputs().size() == 1 ? ",)" : ")");
+            stmt,
+            node->inputs(),
+            "(",
+            tuplePrintEndChar(node->inputs().size()).c_str());
       } break;
       case prim::TupleIndex: {
         stmt << "(" << useOf(node->inputs().at(0)) << ")["
